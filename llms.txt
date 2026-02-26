@@ -1,0 +1,38 @@
+# aigc-kit
+
+> 统一 AIGC 能力工具包，封装图片生成、LLM Chat Completions、Embedding 和对象存储，提供一致的 Python 调用接口。支持 volcengine / gemini / dashscope / deepseek / bedrock 等多个 Provider。
+
+- Python >= 3.12，MIT License
+- 所有 LLM Provider 统一使用 OpenAI 格式的 messages，非 OpenAI 兼容后端（Gemini、Bedrock）内部自动转换
+- temperature 统一为 0-100 百分比，各 provider 自行映射到实际范围
+- Image Provider 返回 base64 时，配合 Storage 自动转 webp 并上传获取 URL
+
+## API 参考
+
+- [完整 API 文档](llms-full.txt): 所有模块的数据结构、抽象接口、Provider 特性对比、环境变量和扩展指南
+
+## 源码
+
+- [Image 基类](src/aigc_kit/image/base.py): ImageProvider 抽象接口和 ImageResult 数据结构
+- [Image 客户端](src/aigc_kit/image/client.py): ImageClient 统一入口，自动路由 provider 和 base64→URL 上传
+- [LLM 基类](src/aigc_kit/llm/base.py): LLMProvider 抽象接口、ChatResult、ChatChunk、ToolCall
+- [OpenAI 兼容工具](src/aigc_kit/llm/providers/_openai_compat.py): OpenAI 兼容 API 的公共响应解析函数
+- [Gemini LLM](src/aigc_kit/llm/providers/gemini.py): Google Gemini Provider，含 OpenAI→Gemini 格式转换
+- [Bedrock LLM](src/aigc_kit/llm/providers/bedrock.py): Amazon Bedrock Provider (Converse API)，含格式转换和 json_schema 合成 tool 实现
+- [DeepSeek LLM](src/aigc_kit/llm/providers/deepseek.py): DeepSeek Provider，含 json_schema→json_object 自动降级
+- [DashScope LLM](src/aigc_kit/llm/providers/dashscope.py): 通义千问 Provider (OpenAI 兼容)
+- [Embedding 基类](src/aigc_kit/embedding/base.py): EmbeddingProvider 抽象接口和 EmbeddingResult
+- [Storage 基类](src/aigc_kit/storage/base.py): StorageProvider 抽象接口和 UploadResult
+- [R2 Storage](src/aigc_kit/storage/r2.py): Cloudflare R2 存储实现
+
+## Optional
+
+- [Volcengine LLM](src/aigc_kit/llm/providers/volcengine.py): 火山引擎豆包 (OpenAI 兼容)
+- [智谱 LLM](src/aigc_kit/llm/providers/zhipu.py): 智谱 GLM (OpenAI 兼容)
+- [Moonshot LLM](src/aigc_kit/llm/providers/moonshot.py): Moonshot (OpenAI 兼容)
+- [Volcengine Image](src/aigc_kit/image/providers/volcengine.py): 豆包 Seedream 图片生成
+- [Gemini Image](src/aigc_kit/image/providers/gemini.py): Google Gemini 图片生成
+- [DashScope Image](src/aigc_kit/image/providers/dashscope.py): 通义万相图片生成
+- [Bedrock Embedding](src/aigc_kit/embedding/providers/bedrock.py): AWS Bedrock Titan Embedding
+- [DashScope Embedding](src/aigc_kit/embedding/providers/dashscope.py): 通义百炼 Embedding
+- [Stub Embedding](src/aigc_kit/embedding/providers/stub.py): 零向量桩实现 (开发/测试用)

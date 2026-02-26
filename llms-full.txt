@@ -1,0 +1,332 @@
+# aigc-kit
+
+> 统一 AIGC 能力工具包，封装图片生成、LLM Chat、Embedding 和存储后端，提供一致的 Python 调用接口。
+
+Python >= 3.12 | MIT License
+
+## 项目结构
+
+```
+src/aigc_kit/
+├── __init__.py          # 导出: ImageClient, ImageResult, ChatResult, ChatChunk, LLMProvider, ToolCall, EmbeddingProvider, EmbeddingResult
+├── image/
+│   ├── base.py          # ImageProvider(ABC), ImageResult
+│   ├── client.py        # ImageClient (统一入口，自动路由 provider，base64→URL 上传)
+│   └── providers/
+│       ├── volcengine.py   # 豆包 Seedream
+│       ├── gemini.py       # Google Gemini (Vertex AI)
+│       └── dashscope.py    # 阿里云通义万相
+├── llm/
+│   ├── base.py          # LLMProvider(ABC), ChatResult, ChatChunk, ToolCall
+│   └── providers/
+│       ├── _openai_compat.py  # OpenAI 兼容 API 的公共解析函数
+│       ├── deepseek.py        # DeepSeek
+│       ├── dashscope.py       # 通义千问 (OpenAI 兼容)
+│       ├── gemini.py          # Google Gemini (google-genai SDK)
+│       ├── bedrock.py         # Amazon Bedrock (Converse API)
+│       ├── volcengine.py      # 火山引擎豆包
+│       ├── zhipu.py           # 智谱 GLM
+│       └── moonshot.py        # Moonshot
+├── embedding/
+│   ├── base.py          # EmbeddingProvider(ABC), EmbeddingResult
+│   └── providers/
+│       ├── bedrock.py      # AWS Bedrock Titan Embedding
+│       ├── dashscope.py    # 通义百炼 (OpenAI 兼容)
+│       └── stub.py         # 零向量桩实现 (开发/测试用)
+└── storage/
+    ├── base.py          # StorageProvider(ABC), UploadResult
+    └── r2.py            # Cloudflare R2 (S3 兼容)
+```
+
+## 依赖
+
+- httpx >= 0.28
+- google-genai >= 1.63.0
+- boto3 >= 1.42.49
+- openai >= 2.21.0
+- pillow >= 12.1.1
+
+## Image 模块
+
+### ImageResult
+
+```python
+@dataclass
+class ImageResult:
+    url: str = ""           # 图片 URL
+    base64: str = ""        # base64 编码
+    mime_type: str = "image/png"
+    provider: str = ""
+    metadata: dict = {}
+    has_url: bool       # property
+    has_base64: bool    # property
+```
+
+### ImageProvider (抽象基类)
+
+```python
+class ImageProvider(ABC):
+    name: str                    # property, provider 名称
+    def text_to_image(self, prompt: str, *, size: str = "1024x1024", **kwargs) -> ImageResult
+    def image_to_image(self, prompt: str, *, reference_images: list[str], size: str = "1024x1024", **kwargs) -> ImageResult
+    def close(self) -> None
+```
+
+### ImageClient (统一入口)
+
+```python
+client = ImageClient(
+    provider="gemini",              # "volcengine" | "gemini" | "dashscope" 或 ImageProvider 实例
+    storage=r2_storage,             # 可选，base64 结果自动上传获取 URL
+    storage_key_prefix="aigc",      # 存储路径前缀
+    **provider_kwargs,              # 透传给 provider 构造函数 (如 model, api_key)
+)
+result = client.text_to_image(prompt, size="1024x1024")
+result = client.image_to_image(prompt, reference_images=["url"], size="1024x1024")
+```
+
+自动行为: 如果 provider 返回 base64 且配置了 storage，自动转 webp 并生成 800/600/320 缩略图后上传。
+
+### Image Provider 特性
+
+| Provider | 文生图 | 图生图 | 返回格式 | 备注 |
+|----------|--------|--------|----------|------|
+| volcengine | ✅ | ✅ | URL | 最小 2048x2048，自动 clamp |
+| gemini | ✅ | ✅ | base64 | 需配合 Storage |
+| dashscope | ✅ | ❌ | URL | 通义万相 |
+
+## LLM 模块
+
+### ChatResult
+
+```python
+@dataclass
+class ChatResult:
+    content: str | None = None
+    tool_calls: list[ToolCall] = []
+    provider: str = ""
+    model: str = ""
+    usage: dict[str, int] = {}    # prompt_tokens, completion_tokens, total_tokens
+    has_tool_calls: bool           # property
+```
+
+### ToolCall
+
+```python
+@dataclass
+class ToolCall:
+    call_id: str
+    name: str
+    arguments: str    # JSON 字符串
+```
+
+### ChatChunk (流式)
+
+```python
+@dataclass
+class ChatChunk:
+    delta_content: str = ""
+    tool_call_index: int | None = None
+    tool_call_id: str = ""
+    tool_call_name: str = ""
+    tool_call_arguments: str = ""
+    finish_reason: str | None = None
+```
+
+### LLMProvider (抽象基类)
+
+```python
+class LLMProvider(ABC):
+    name: str              # property
+    default_model: str     # property
+
+    def chat(
+        self, messages: list[dict],
+        *, model: str | None = None,
+        tools: list[dict] | None = None,
+        temperature: int = 70,              # 百分比 0-100，各 provider 自行映射
+        max_completion_tokens: int | None = None,
+        response_format: dict | None = None,
+        thinking: dict | None = None,       # {"type": "enabled"} 或 {"type": "disabled"}
+        **kwargs,
+    ) -> ChatResult
+
+    def chat_stream(...) -> Iterator[ChatChunk]   # 参数同 chat
+    def close(self) -> None
+```
+
+### LLM Provider 特性
+
+| Provider | 类 | Structured Output | Tool Calling | Streaming | 温度映射 |
+|----------|---|-------------------|--------------|-----------|----------|
+| deepseek | DeepSeekProvider | json_object (自动降级) | ✅ | ✅ | 0-2.0 |
+| dashscope | DashScopeProvider | json_schema | ✅ | ✅ | 0-2.0 |
+| gemini | GeminiProvider | response_json_schema | ✅ | ✅ | 0-2.0 |
+| bedrock | BedrockProvider | 合成 tool 实现 | ✅ | ✅ | 0-1.0 |
+| volcengine | (OpenAI 兼容) | json_schema | ✅ | ✅ | 0-2.0 |
+| zhipu | (OpenAI 兼容) | json_schema | ✅ | ✅ | 0-2.0 |
+| moonshot | (OpenAI 兼容) | json_schema | ✅ | ✅ | 0-2.0 |
+
+### 消息格式
+
+所有 provider 统一使用 OpenAI 格式的 messages:
+
+```python
+messages = [
+    {"role": "system", "content": "你是一个助手"},
+    {"role": "user", "content": "你好"},
+    {"role": "assistant", "content": "你好！", "tool_calls": [...]},
+    {"role": "tool", "tool_call_id": "xxx", "content": '{"result": ...}'},
+]
+```
+
+Gemini 和 Bedrock provider 内部自动转换为各自原生格式。
+
+### Structured Output
+
+```python
+response_format = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "character",
+        "schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+    },
+}
+result = llm.chat(messages, response_format=response_format)
+```
+
+- DeepSeek: 自动降级为 json_object + system prompt 引导
+- Bedrock: 通过合成 tool + toolChoice 实现
+
+### Thinking 模式
+
+```python
+result = llm.chat(messages, thinking={"type": "enabled", "budget_tokens": 8192})
+```
+
+- Gemini: 映射为 ThinkingConfig
+- Bedrock: 映射为 additionalModelRequestFields
+
+## Embedding 模块
+
+### EmbeddingResult
+
+```python
+@dataclass
+class EmbeddingResult:
+    vectors: list[list[float]]
+    provider: str = ""
+    model: str = ""
+    dimensions: int = 0
+    usage: dict[str, int] = {}
+```
+
+### EmbeddingProvider (抽象基类)
+
+```python
+class EmbeddingProvider(ABC):
+    name: str              # property
+    default_model: str     # property
+    dimensions: int        # property
+
+    def embed(self, texts: list[str], *, model: str | None = None) -> EmbeddingResult
+    def close(self) -> None
+```
+
+### Embedding Provider 列表
+
+| Provider | 类 | 默认模型 | 默认维度 |
+|----------|---|---------|---------|
+| bedrock | BedrockEmbeddingProvider | amazon.titan-embed-text-v2:0 | 1024 |
+| dashscope | DashScopeEmbeddingProvider | text-embedding-v4 | 1024 |
+| stub | StubEmbeddingProvider | stub-embedding | 1536 |
+
+## Storage 模块
+
+### UploadResult
+
+```python
+@dataclass
+class UploadResult:
+    url: str
+    key: str
+    bucket: str = ""
+```
+
+### StorageProvider (抽象基类)
+
+```python
+class StorageProvider(ABC):
+    name: str    # property
+    def upload_bytes(self, data: bytes, key: str, *, content_type: str = "image/png") -> UploadResult
+    def close(self) -> None
+```
+
+### R2Storage
+
+```python
+storage = R2Storage(
+    access_key_id="...",
+    access_key_secret="...",
+    endpoint="https://xxx.r2.cloudflarestorage.com",
+    bucket="my-bucket",
+    public_domain="https://assets.example.com",  # 可选，用于拼接公开 URL
+)
+result = storage.upload_bytes(data, "path/to/file.png", content_type="image/png")
+result = storage.upload_base64(b64_string, key_prefix="images", ext="png")
+```
+
+## 环境变量
+
+### DeepSeek
+- DEEPSEEK_API_KEY (必需)
+- DEEPSEEK_MODEL (默认 deepseek-chat)
+- DEEPSEEK_BASE_URL (默认 https://api.deepseek.com)
+
+### DashScope (LLM + Embedding + Image)
+- DASHSCOPE_API_KEY (必需)
+- DASHSCOPE_MODEL (默认 qwen-plus)
+- DASHSCOPE_BASE_URL (默认 https://dashscope.aliyuncs.com/compatible-mode/v1)
+
+### Gemini (Vertex AI)
+- GEMINI_MODEL (默认 gemini-2.5-flash)
+- GOOGLE_CLOUD_PROJECT
+- GOOGLE_CLOUD_LOCATION
+- GOOGLE_APPLICATION_CREDENTIALS
+- GOOGLE_GENAI_USE_VERTEXAI=true
+
+### Bedrock (LLM + Embedding)
+- BEDROCK_MODEL (默认 anthropic.claude-sonnet-4-20250514-v1:0)
+- BEDROCK_REGION (默认 us-east-1)
+- AWS_PROFILE (可选)
+
+### Volcengine
+- VOLCENGINE_API_KEY
+- VOLCENGINE_BASE_URL (默认 https://ark.cn-beijing.volces.com/api/v3)
+- VOLCENGINE_IMAGE_MODEL (默认 doubao-seedream-4-5-251128)
+
+### Cloudflare R2
+- R2_ACCESS_KEY_ID
+- R2_ACCESS_KEY_SECRET
+- R2_ENDPOINT
+- R2_BUCKET_NAME
+- R2_PUBLIC_DOMAIN
+
+## 扩展指南
+
+### 添加 Image Provider
+
+继承 `ImageProvider`，实现 `name`、`text_to_image`、`image_to_image`，在 `image/client.py` 的 `_ensure_registered` 中注册。
+
+### 添加 LLM Provider
+
+OpenAI 兼容后端: 参考 `DeepSeekProvider` 或 `DashScopeProvider`，使用 `_openai_compat` 公共函数。
+自定义协议: 继承 `LLMProvider`，实现 `chat` 和 `chat_stream`，参考 `GeminiProvider` 或 `BedrockProvider`。
+
+### 添加 Embedding Provider
+
+继承 `EmbeddingProvider`，实现 `name`、`default_model`、`dimensions`、`embed`。
+
+### 添加 Storage Provider
+
+继承 `StorageProvider`，实现 `name`、`upload_bytes`。
